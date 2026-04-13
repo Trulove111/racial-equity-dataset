@@ -69,6 +69,36 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.2.0] — 2026-04-12
+
+### Added
+- **`analysis/equity_regression_analysis.ipynb`** — Jupyter notebook running OLS regression with HC3 robust standard errors to test whether equity plan comprehensiveness predicts racial outcome gaps across all 20 cities. Covers 9 sections:
+  - *Load & Prepare* — feature engineering: `plan_ordinal` (0–3 ordinal encoding of plan status), `is_comprehensive` dummy, `accountability_count` (sum of 7 binary plan flags), `poverty_gap` (Black−White poverty rate difference), `rent_burden_gap` (Black−White rent burden difference), `log_median_income`
+  - *EDA* — summary statistics by plan status group, Pearson correlation matrix heatmap, scatter plots with OLS fit lines, boxplots by plan status for all four outcome variables
+  - *Regression models (8 total)* — 3 predictor specifications × 4 outcomes using `statsmodels.formula.api.ols` with HC3 heteroskedasticity-robust standard errors:
+    - Outcomes: Black Poverty Rate, Black Rent Burden %, Poverty Gap (B−W), Rent Burden Gap (B−W)
+    - M1a/M1b/M1c: equity_score continuous, plan_ordinal ordinal, equity_score + log_median_income controlled
+    - M2a/M2b/M2c: same predictors on rent burden outcomes
+    - M3a/M3b: poverty gap and rent burden gap as outcomes
+  - *Diagnostics* — residuals vs. fitted, Q-Q normality plot, Cook's distance influence plot, Breusch-Pagan heteroskedasticity test, Variance Inflation Factor (VIF) for multicollinearity
+  - *Bootstrap CIs* — 5,000-resample percentile-method confidence intervals on all slope coefficients
+  - *Coefficient plot* — forest plot of all 8 models with HC3 CI error bars side-by-side for comparison
+  - *Accountability element breakdown* — point-biserial correlations between each of the 7 binary plan accountability flags (budget commitment, enforcement mechanism, timeline, agency accountability, community oversight, housing focus, anti-displacement) and each outcome variable
+  - *Results summary table* — consolidated β, SE, p-value, and 95% CI for all models
+  - *Interpretation & caveats* — endogeneity (cities with better outcomes may have more capacity for plans), confounding (income, history, demographics), n=20 power limitations, plan age lag (older plans may show stronger effects)
+- Notebook auto-loads CSV from `../data/racial_equity_20_cities.csv` relative to `analysis/`, falling back to the GitHub raw URL if not found locally — works out-of-the-box in Google Colab with no additional setup
+- Notebook available on Google Drive: https://drive.google.com/file/d/154z-RtiReftj9iRbRPpFosyrlUlbL_KQ/view?usp=drivesdk
+
+### Changed
+- No data values or schema changed in this release
+- No validator changes — this is a pure analysis addition
+
+### Dependencies (notebook only)
+- `pandas`, `numpy`, `matplotlib`, `seaborn`, `statsmodels`, `scipy` — all available in standard Colab/conda environments
+- `scikit-learn` used only for `StandardScaler` in EDA section
+
+---
+
 ## [Unreleased]
 
 ### Planned
@@ -76,3 +106,4 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Add FY2026–27 budget data as cities finalize budgets (Q3 2026)
 - Add `blackMedianWealth` and `whiteMedianWealth` fields when city-level data available
 - Expand to 30 largest cities (cities 21–30 by population)
+- Add notebook for time-series analysis once longitudinal data is available
