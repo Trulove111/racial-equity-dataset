@@ -1,0 +1,226 @@
+name: Validate Dataset
+
+on:
+  push:
+    paths:
+      - "data/**"
+      - "scripts/validate_csv.py"
+      - ".github/workflows/validate-data.yml"
+  pull_request:
+    paths:
+      - "data/**"
+      - "scripts/validate_csv.py"
+      - ".github/workflows/validate-data.yml"
+
+# Cancel in-progress runs on the same branch when a newer commit is pushed
+concurrency:
+  group: validate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: CSV Validation
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write   # allows posting a PR comment with the report
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2     # need parent commit for diff-based reporting
+
+      # ── Python setup ────────────────────────────────────────────────────────
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install --quiet pandas scipy
+
+      # ── Detect which CSV files changed ──────────────────────────────────────
+      - name: Detect changed CSV files
+        id: changed
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+          else
+            BASE="HEAD^"
+          fi
+          CHANGED=$(git diff --name-only "$BASE" HEAD -- 'data/*.csv' 2>/dev/null || echo "")
+          echo "files=$CHANGED" >> $GITHUB_OUTPUT
+          if [ -z "$CHANGED" ]; then
+            echo "No CSV files changed — running full validation anyway."
+          else
+            echo "Changed CSV files:"
+            echo "$CHANGED"
+          fi
+
+      # ── Full validation (always runs) ────────────────────────────────────────
+      - name: Run CSV validator
+        id: validate
+        run: |
+          python3 scripts/validate_csv.py 2>&1 | tee /tmp/validation_report.txt
+          EXIT_CODE=${PIPESTATUS[0]}
+          echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
+
+          # Capture counts for the summary
+          FAILS=$(grep -c '^\s*\[FAIL\]' /tmp/validation_report.txt || echo 0)
+          WARNS=$(grep -c '^\s*\[WARN\]' /tmp/validation_report.txt || echo 0)
+          echo "failures=$FAILS" >> $GITHUB_OUTPUT
+          echo "warnings=$WARNS" >> $GITHUB_OUTPUT
+
+          exit $EXIT_CODE
+        continue-on-error: true   # always post the report, even on failure
+
+      # ── Detailed diff: validate only changed files and compare to main ───────
+      - name: Validate changed files only (diff report)
+        id: diff_validate
+        if: steps.changed.outputs.files != ''
+        run: |
+          for f in ${{ steps.changed.outputs.files }}; do
+            echo "--- Diff validation: $f ---"
+            python3 scripts/validate_csv.py "$f" 2>&1
+          done | tee /tmp/diff_report.txt
+        continue-on-error: true
+
+      # ── Schema drift detection: compare columns to locked schema ─────────────
+      - name: Check for schema drift vs. previous commit
+        id: schema_drift
+        run: |
+          python3 - <<'PYEOF'
+          import csv, sys, pathlib
+
+          EXPECTED = [
+            "Rank","City","State","Equity Score (0-100)","Plan Status","Plan Year",
+            "Has Equity Plan","Measurable Goals","Has Timelines","Has Budget Commitment",
+            "Has Enforcement","Equity Office Exists","Annual Reporting","Agency Count",
+            "Official Poverty Rate (%)","Black Poverty Rate (%)","Latinx Poverty Rate (%)",
+            "White Poverty Rate (%)","Median Household Income ($)","Black Median Income ($)",
+            "Latinx Median Income ($)","White Median Income ($)","True COL Gap (% below)",
+            "Median Rent ($/mo)","Black Rent Burden (%)","Latinx Rent Burden (%)",
+            "White Rent Burden (%)","Black Homeownership (%)","White Homeownership (%)",
+            "Rent Burden Gap (pp Black-White)","Black Wage Gap (cents per White $)",
+            "Latinx Wage Gap (cents per White $)","Black Unemployment Rate (%)",
+            "White Unemployment Rate (%)","Unemployment Gap (ratio)",
+            "Black Avg Commute (min)","White Avg Commute (min)","Commute Gap (min/week)",
+            "Accountability Gaps","Sources"
+          ]
+
+          drift_found = False
+          for path in sorted(pathlib.Path("data").glob("*.csv")):
+            with open(path, newline="", encoding="utf-8-sig") as f:
+              actual = csv.DictReader(f).fieldnames or []
+            missing = set(EXPECTED) - set(actual)
+            extra   = set(actual) - set(EXPECTED)
+            if missing:
+              print(f"DRIFT in {path.name}: missing columns: {sorted(missing)}")
+              drift_found = True
+            if extra:
+              print(f"NEW COLUMNS in {path.name}: {sorted(extra)} — update schema if intentional")
+              drift_found = True
+
+          if not drift_found:
+            print("Schema check: all columns match locked schema ✅")
+          sys.exit(1 if drift_found else 0)
+          PYEOF
+        continue-on-error: true
+
+      # ── Row count trend ───────────────────────────────────────────────────────
+      - name: Row count summary
+        run: |
+          python3 - <<'PYEOF'
+          import csv, pathlib
+          for path in sorted(pathlib.Path("data").glob("*.csv")):
+            with open(path, newline="", encoding="utf-8-sig") as f:
+              rows = list(csv.DictReader(f))
+            print(f"{path.name}: {len(rows)} rows")
+            if len(rows) < 20:
+              print(f"  ⚠️  WARNING: fewer than 20 rows in {path.name}")
+          PYEOF
+
+      # ── Post PR comment with full report ─────────────────────────────────────
+      - name: Post validation report to PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.existsSync('/tmp/validation_report.txt')
+              ? fs.readFileSync('/tmp/validation_report.txt', 'utf8')
+              : '(no report generated)';
+
+            const failures = parseInt('${{ steps.validate.outputs.failures }}') || 0;
+            const warnings = parseInt('${{ steps.validate.outputs.warnings }}') || 0;
+            const exitCode = parseInt('${{ steps.validate.outputs.exit_code }}') || 0;
+
+            const statusIcon = exitCode === 0 ? '✅' : '❌';
+            const statusText = exitCode === 0 ? 'All checks passed' : 'Validation failed';
+
+            const body = `## ${statusIcon} CSV Validation Report
+
+            **${statusText}** — ${failures} failure(s), ${warnings} warning(s)
+
+            <details>
+            <summary>Full validation output</summary>
+
+            \`\`\`
+            ${report.trim()}
+            \`\`\`
+            </details>
+
+            ---
+            *Checks: schema drift · type errors · range violations · missing values · outliers (IQR ×3) · cross-field logic · row count · duplicates*
+            `;
+
+            // Find existing bot comment to update rather than spam
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c =>
+              c.user.type === 'Bot' && c.body.includes('CSV Validation Report')
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+      # ── Upload report as artifact ─────────────────────────────────────────────
+      - name: Upload validation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-report-${{ github.sha }}
+          path: /tmp/validation_report.txt
+          retention-days: 30
+
+      # ── Final status gate ─────────────────────────────────────────────────────
+      - name: Fail job if validation failed
+        if: steps.validate.outputs.exit_code != '0'
+        run: |
+          echo "❌ CSV validation failed. See report above."
+          echo "Common fixes:"
+          echo "  SCHEMA_DRIFT   — column was renamed or removed; update data or docs/column_definitions.md"
+          echo "  MISSING_VALUE  — required field is blank; check the row and add source data"
+          echo "  TYPE_ERROR     — wrong data type; booleans must be 'true'/'false' (lowercase)"
+          echo "  RANGE_VIOLATION — value outside domain bounds; verify against primary source"
+          echo "  CROSS_FIELD    — logical inconsistency between two fields; review both values"
+          echo "  DUPLICATE_ROW  — same city appears twice; remove the duplicate row"
+          exit 1
