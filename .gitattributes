@@ -1,0 +1,9 @@
+# Ensure consistent line endings
+* text=auto
+
+# Mark data files as binary to prevent diff noise
+data/*.csv linguist-generated=false
+data/*.tsv linguist-generated=false
+
+# Force CSV diffs to show as text
+*.csv diff=csv
